@@ -43,7 +43,7 @@ public:
   DSP_SAMPLE** Process(DSP_SAMPLE** inputs, const int numChannels, const int numFrames);
   virtual void Reset(const double sampleRate, const int maxBlockSize) override;
   // :param val: Assumed to be between 0 and 10, 5 is "noon"
-  void SetParam(const std::string name, const double val);
+  virtual void SetParam(const std::string name, const double val) override;
 
 
 protected:
@@ -56,5 +56,13 @@ protected:
   double mMiddleVal = 5.0;
   double mTrebleVal = 5.0;
 };
+
+
+class VariableNamToneStack : public BasicNamToneStack
+{
+public:
+  void SetParam(const std::string name, const double val, const double freq);
+};
+
 }; // namespace tone_stack
 }; // namespace dsp

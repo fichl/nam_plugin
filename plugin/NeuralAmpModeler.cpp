@@ -5,7 +5,6 @@
 #include <utility>
 
 #include "Colors.h"
-
 // clang-format off
 // These includes need to happen in this order or else the latter won't know
 // a bunch of stuff.
@@ -21,12 +20,14 @@ using namespace igraphics;
 
 const double kDCBlockerFrequency = 5.0;
 
+iplug::igraphics::IColor NAM_CUSTOMTHEMECOLOR = PluginColors::NAM_THEMECOLOR;
+
 // Styles
 const IVColorSpec colorSpec{
   DEFAULT_BGCOLOR, // Background
   PluginColors::NAM_THEMECOLOR, // Foreground
   PluginColors::NAM_THEMECOLOR.WithOpacity(0.3f), // Pressed
-  PluginColors::NAM_THEMECOLOR.WithOpacity(0.4f), // Frame
+  PluginColors::NAM_THEMECOLOR.WithOpacity(0.1f), // Frame
   PluginColors::MOUSEOVER, // Highlight
   DEFAULT_SHCOLOR, // Shadow
   PluginColors::NAM_THEMECOLOR, // Extra 1
@@ -49,9 +50,13 @@ const IVStyle style =
           DEFAULT_SHADOW_OFFSET,
           DEFAULT_WIDGET_FRAC,
           DEFAULT_WIDGET_ANGLE};
-
 const IVStyle titleStyle =
   DEFAULT_STYLE.WithValueText(IText(30, COLOR_WHITE, "Michroma-Regular")).WithDrawFrame(false).WithShadowOffset(2.f);
+const IVStyle radioButtonStyle =
+  style
+    .WithColor(EVColor::kON, PluginColors::NAM_THEMECOLOR) // Pressed buttons and their labels
+    .WithColor(EVColor::kOFF, PluginColors::NAM_THEMECOLOR.WithOpacity(0.1f)) // Unpressed buttons
+    .WithColor(EVColor::kX1, PluginColors::NAM_THEMECOLOR.WithOpacity(0.6f)); // Unpressed buttons' labels
 
 EMsgBoxResult _ShowMessageBox(iplug::igraphics::IGraphics* pGraphics, const char* str, const char* caption,
                               EMsgBoxType type)
@@ -63,6 +68,11 @@ EMsgBoxResult _ShowMessageBox(iplug::igraphics::IGraphics* pGraphics, const char
   return pGraphics->ShowMessageBox(str, caption, type);
 #endif
 }
+
+const std::string kCalibrateInputParamName = "CalibrateInput";
+const bool kDefaultCalibrateInput = false;
+const std::string kInputCalibrationLevelParamName = "InputCalibrationLevel";
+const double kDefaultInputCalibrationLevel = 12.0;
 
 
 NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
@@ -78,8 +88,16 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
   GetParam(kNoiseGateThreshold)->InitGain("Threshold", -80.0, -100.0, 0.0, 0.1);
   GetParam(kNoiseGateActive)->InitBool("NoiseGateActive", true);
   GetParam(kEQActive)->InitBool("ToneStack", true);
-  GetParam(kOutNorm)->InitBool("OutNorm", true);
+  GetParam(kOutputMode)->InitEnum("OutputMode", 1, {"Raw", "Normalized", "Calibrated"}); // TODO DRY w/ control
   GetParam(kIRToggle)->InitBool("IRToggle", true);
+  GetParam(kCalibrateInput)->InitBool(kCalibrateInputParamName.c_str(), kDefaultCalibrateInput);
+  GetParam(kInputCalibrationLevel)
+    ->InitDouble(kInputCalibrationLevelParamName.c_str(), kDefaultInputCalibrationLevel, -60.0, 60.0, 0.1, "dBu");
+  GetParam(kBassFrequency)->InitDouble("BassFrequency", 150.0, 20.0, 300.0, 0.5);
+  GetParam(kMidFrequency)->InitDouble("MiddleFrequency", 425.0, 200.0, 1000.0, 0.5);
+  GetParam(kTrebleFrequency)->InitDouble("TrebleFrequency", 1800.0, 800.0, 6200.0, 0.5);
+  GetParam(kShowFrequencySliders)->InitBool("showFrquencySliders", false);
+  GetParam(kFollowTrackColor)->InitBool("followTrackColor", false);
 
   mNoiseGateTrigger.AddListener(&mNoiseGateGain);
 
@@ -112,9 +130,12 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     const auto modelIconSVG = pGraphics->LoadSVG(MODEL_ICON_FN);
     const auto irIconOnSVG = pGraphics->LoadSVG(IR_ICON_ON_FN);
     const auto irIconOffSVG = pGraphics->LoadSVG(IR_ICON_OFF_FN);
+    const auto frequencySlidersIconOnSVG = pGraphics->LoadSVG(FREQUENCYSLIDERS_ICON_ON_FN);
+    const auto frequencySlidersIconOffSVG = pGraphics->LoadSVG(FREQUENCYSLIDERS_ICON_OFF_FN);
 
     const auto backgroundBitmap = pGraphics->LoadBitmap(BACKGROUND_FN);
     const auto fileBackgroundBitmap = pGraphics->LoadBitmap(FILEBACKGROUND_FN);
+    const auto inputLevelBackgroundBitmap = pGraphics->LoadBitmap(INPUTLEVELBACKGROUND_FN);
     const auto linesBitmap = pGraphics->LoadBitmap(LINES_FN);
     const auto knobBackgroundBitmap = pGraphics->LoadBitmap(KNOBBACKGROUND_FN);
     const auto switchHandleBitmap = pGraphics->LoadBitmap(SLIDESWITCHHANDLE_FN);
@@ -129,9 +150,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     // Areas for knobs
     const auto knobsPad = 20.0f;
     const auto knobsExtraSpaceBelowTitle = 25.0f;
-    const auto knobHeight = 120.f;
     const auto singleKnobPad = -2.0f;
-    const auto knobsArea = contentArea.GetFromTop(knobHeight)
+    const auto knobsArea = contentArea.GetFromTop(NAM_KNOB_HEIGHT)
                              .GetReducedFromLeft(knobsPad)
                              .GetReducedFromRight(knobsPad)
                              .GetVShifted(titleHeight + knobsExtraSpaceBelowTitle);
@@ -148,6 +168,16 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     const auto outNormToggleArea =
       outputKnobArea.GetVShifted(midKnobArea.H()).SubRectVertical(2, 0).GetReducedFromTop(10.0f);
 
+    // Area for frequency sliders
+    const auto bassSliderArea =
+      bassKnobArea.SubRectVertical(2, 0).GetReducedFromBottom(2.0f).GetHPadded(-16.f).GetVShifted(-35.f);
+    const auto midSliderArea =
+      midKnobArea.SubRectVertical(2, 0).GetReducedFromBottom(2.0f).GetHPadded(-16.f).GetVShifted(-35.f);
+    const auto trebleSliderArea =
+      trebleKnobArea.SubRectVertical(2, 0).GetReducedFromBottom(2.0f).GetHPadded(-16.f).GetVShifted(-35.f);
+    const auto frequencySliderToggleArea =
+      eqToggleArea.SubRectVertical(2, 0).GetPadded(-7.f).GetVShifted(31.f).GetHShifted(49.f);
+
     // Areas for model and IR
     const auto fileWidth = 200.0f;
     const auto fileHeight = 30.0f;
@@ -163,7 +193,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     const auto outputMeterArea = contentArea.GetFromRight(30).GetHShifted(20).GetMidVPadded(100).GetVShifted(-25);
 
     // Misc Areas
-    const auto settingsButtonArea = mainArea.GetFromTRHC(50, 50).GetCentredInside(20, 20);
+    const auto settingsButtonArea = CornerButtonArea(b);
 
     // Model loader button
     auto loadModelCompletionHandler = [&](const WDL_String& fileName, const WDL_String& path) {
@@ -223,8 +253,6 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     pGraphics->AttachControl(
       new NAMSwitchControl(ngToggleArea, kNoiseGateActive, "Noise Gate", style, switchHandleBitmap));
     pGraphics->AttachControl(new NAMSwitchControl(eqToggleArea, kEQActive, "EQ", style, switchHandleBitmap));
-    pGraphics->AttachControl(
-      new NAMSwitchControl(outNormToggleArea, kOutNorm, "Normalize", style, switchHandleBitmap), kCtrlTagOutNorm);
 
     // The knobs
     pGraphics->AttachControl(new NAMKnobControl(inputKnobArea, kInputLevel, "", style, knobBackgroundBitmap));
@@ -241,22 +269,49 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     pGraphics->AttachControl(new NAMMeterControl(inputMeterArea, meterBackgroundBitmap, style), kCtrlTagInputMeter);
     pGraphics->AttachControl(new NAMMeterControl(outputMeterArea, meterBackgroundBitmap, style), kCtrlTagOutputMeter);
 
+    // Frequency Sliders
+    pGraphics->AttachControl(new IVSliderControl(bassSliderArea, kBassFrequency, " ",
+                                                 style.WithColor(kFG, PluginColors::OFF_WHITE)
+                                                   .WithValueText(IText(DEFAULT_TEXT_SIZE - 3.f, EVAlign::Bottom,
+                                                                        PluginColors::NAM_THEMEFONTCOLOR)),
+                                                 true, EDirection::Horizontal, DEFAULT_GEARING, 4.f),
+                             -1, "NAM_Controls_FS");
+    pGraphics->AttachControl(new IVSliderControl(midSliderArea, kMidFrequency, " ",
+                                                 style.WithColor(kFG, PluginColors::OFF_WHITE)
+                                                   .WithValueText(IText(DEFAULT_TEXT_SIZE - 3.f, EVAlign::Bottom,
+                                                                        PluginColors::NAM_THEMEFONTCOLOR)),
+                                                 true, EDirection::Horizontal, DEFAULT_GEARING, 4.f),
+                             -1, "NAM_Controls_FS");
+    pGraphics->AttachControl(new IVSliderControl(trebleSliderArea, kTrebleFrequency, " ",
+                                                 style.WithColor(kFG, PluginColors::OFF_WHITE)
+                                                   .WithValueText(IText(DEFAULT_TEXT_SIZE - 3.f, EVAlign::Bottom,
+                                                                        PluginColors::NAM_THEMEFONTCOLOR)),
+                                                 true, EDirection::Horizontal, DEFAULT_GEARING, 4.f),
+                             -1, "NAM_Controls_FS");
+    pGraphics->AttachControl(new ISVGSwitchControl(
+      frequencySliderToggleArea, {frequencySlidersIconOffSVG, frequencySlidersIconOnSVG}, kShowFrequencySliders));
+
     // Settings/help/about box
     pGraphics->AttachControl(new NAMCircleButtonControl(
       settingsButtonArea,
       [pGraphics](IControl* pCaller) {
-        pGraphics->GetControlWithTag(kCtrlTagSettingsBox)->As<NAMAboutBoxControl>()->HideAnimated(false);
+        pGraphics->GetControlWithTag(kCtrlTagSettingsBox)->As<NAMSettingsPageControl>()->HideAnimated(false);
       },
       gearSVG));
 
-    pGraphics->AttachControl(new NAMAboutBoxControl(b, backgroundBitmap, style), kCtrlTagSettingsBox)->Hide(true);
+    pGraphics
+      ->AttachControl(new NAMSettingsPageControl(b, backgroundBitmap, inputLevelBackgroundBitmap, switchHandleBitmap,
+                                                 crossSVG, style, radioButtonStyle),
+                      kCtrlTagSettingsBox)
+      ->Hide(true);
 
     pGraphics->ForAllControlsFunc([](IControl* pControl) {
       pControl->SetMouseEventsWhenDisabled(true);
       pControl->SetMouseOverWhenDisabled(true);
     });
 
-    pGraphics->GetControlWithTag(kCtrlTagOutNorm)->SetMouseEventsWhenDisabled(false);
+    // pGraphics->GetControlWithTag(kCtrlTagOutNorm)->SetMouseEventsWhenDisabled(false);
+    // pGraphics->GetControlWithTag(kCtrlTagCalibrateInput)->SetMouseEventsWhenDisabled(false);
   };
 }
 
@@ -315,17 +370,12 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
 
     for (int s = 0; s < nFrames; ++s)
       mOutputPointers[0][s] = mIntermediateOut[s];
-    // Normalize loudness
-    if (GetParam(kOutNorm)->Value())
-    {
-      _NormalizeModelOutput(mOutputPointers, numChannelsInternal, numFrames);
-    }
   }
   else
   {
     _FallbackDSP(triggerOutput, mOutputPointers, numChannelsInternal, numFrames);
   }
-  // Apply the noise gate
+  // Apply the noise gate after the NAM
   sample** gateGainOutput =
     noiseGateActive ? mNoiseGateGain.Process(mOutputPointers, numChannelsInternal, numFrames) : mOutputPointers;
 
@@ -385,10 +435,46 @@ void NeuralAmpModeler::OnIdle()
   if (mNewModelLoadedInDSP)
   {
     if (auto* pGraphics = GetUI())
-      pGraphics->GetControlWithTag(kCtrlTagOutNorm)->SetDisabled(!mModel->HasLoudness());
-
-    mNewModelLoadedInDSP = false;
+    {
+      _UpdateControlsFromModel();
+      mNewModelLoadedInDSP = false;
+    }
   }
+  if (mModelCleared)
+  {
+    if (auto* pGraphics = GetUI())
+    {
+      // FIXME -- need to disable only the "normalized" model
+      // pGraphics->GetControlWithTag(kCtrlTagOutputMode)->SetDisabled(false);
+      static_cast<NAMSettingsPageControl*>(pGraphics->GetControlWithTag(kCtrlTagSettingsBox))->ClearModelInfo();
+      mModelCleared = false;
+    }
+  }
+
+  // is it a bad idea to move this here from OnUIOpen ??
+  GetUI()->ForStandardControlsFunc([&](IControl* pControl) {
+    if (auto* pVectorBase = pControl->As<IVectorBase>())
+    {
+      if (GetParam(kFollowTrackColor)->Value())
+      {
+        int r, g, b;
+        GetTrackColor(r, g, b);
+        if (r + g + b > 0) // is default color set in DAW ?
+          NAM_CUSTOMTHEMECOLOR = IColor(255, r, g, b);
+      }
+      else
+      {
+        if (mHighLightColor.GetLength())
+          NAM_CUSTOMTHEMECOLOR = IColor::FromColorCodeStr(mHighLightColor.Get());
+      }
+      pVectorBase->SetColor(kX1, NAM_CUSTOMTHEMECOLOR);
+      pVectorBase->SetColor(kPR, NAM_CUSTOMTHEMECOLOR.WithOpacity(0.6f));
+      pVectorBase->SetColor(kFR, NAM_CUSTOMTHEMECOLOR.WithOpacity(0.1f));
+      pVectorBase->SetColor(kX3, NAM_CUSTOMTHEMECOLOR.WithContrast(0.1f));
+    }
+    pControl->GetUI()->SetAllControlsDirty();
+  });
+
 }
 
 bool NeuralAmpModeler::SerializeState(IByteChunk& chunk) const
@@ -403,34 +489,26 @@ bool NeuralAmpModeler::SerializeState(IByteChunk& chunk) const
   // when we unserialize)
   chunk.PutStr(mNAMPath.Get());
   chunk.PutStr(mIRPath.Get());
+  chunk.PutStr(mHighLightColor.Get());
   return SerializeParams(chunk);
 }
 
 int NeuralAmpModeler::UnserializeState(const IByteChunk& chunk, int startPos)
 {
+  // Look for the expected header. If it's there, then we'll know what to do.
   WDL_String header;
   int pos = startPos;
   pos = chunk.GetStr(header, pos);
-  // Unseralization:
+
+  const char* kExpectedHeader = "###NeuralAmpModeler###";
+  if (strcmp(header.Get(), kExpectedHeader) == 0)
   {
-    // Handle legacy plugin serialized states:
-    // In v0.7.9, this was the NAM filepath. So, if we dont' get the expected header, then we can attempt to unserialize
-    // as v0.7.9:
-    const char* kExpectedHeader = "###NeuralAmpModeler###";
-    if (strcmp(header.Get(), kExpectedHeader) == 0)
-    {
-      pos = _UnserializeStateCurrent(chunk, pos);
-    }
-    else
-    {
-      pos = _UnserializeStateLegacy_0_7_9(chunk, startPos);
-    }
+    return _UnserializeStateWithKnownVersion(chunk, pos);
   }
-  if (mNAMPath.GetLength())
-    _StageModel(mNAMPath);
-  if (mIRPath.GetLength())
-    _StageIR(mIRPath);
-  return pos;
+  else
+  {
+    return _UnserializeStateWithUnknownVersion(chunk, startPos);
+  }
 }
 
 void NeuralAmpModeler::OnUIOpen()
@@ -454,16 +532,33 @@ void NeuralAmpModeler::OnUIOpen()
   }
 
   if (mModel != nullptr)
-    GetUI()->GetControlWithTag(kCtrlTagOutNorm)->SetDisabled(!mModel->HasLoudness());
+
+  {
+    _UpdateControlsFromModel();
+  }
 }
 
 void NeuralAmpModeler::OnParamChange(int paramIdx)
 {
   switch (paramIdx)
   {
-    case kToneBass: mToneStack->SetParam("bass", GetParam(paramIdx)->Value()); break;
-    case kToneMid: mToneStack->SetParam("middle", GetParam(paramIdx)->Value()); break;
-    case kToneTreble: mToneStack->SetParam("treble", GetParam(paramIdx)->Value()); break;
+    // Changes to the input gain
+    case kCalibrateInput:
+    case kInputCalibrationLevel:
+    case kInputLevel: _SetInputGain(); break;
+    // Changes to the output gain
+    case kOutputLevel:
+    case kOutputMode: _SetOutputGain(); break;
+    // Tone stack:
+    case kToneBass:
+    case kBassFrequency:
+      mToneStack->SetParam("bass", GetParam(kToneBass)->Value(), GetParam(kBassFrequency)->Value()); break;
+    case kToneMid:
+    case kMidFrequency:
+      mToneStack->SetParam("middle", GetParam(kToneMid)->Value(), GetParam(kMidFrequency)->Value()); break;
+    case kToneTreble:
+    case kTrebleFrequency:
+      mToneStack->SetParam("treble", GetParam(kToneTreble)->Value(), GetParam(kTrebleFrequency)->Value()); break;
     default: break;
   }
 }
@@ -479,8 +574,40 @@ void NeuralAmpModeler::OnParamChangeUI(int paramIdx, EParamSource source)
       case kNoiseGateActive: pGraphics->GetControlWithParamIdx(kNoiseGateThreshold)->SetDisabled(!active); break;
       case kEQActive:
         pGraphics->ForControlInGroup("EQ_KNOBS", [active](IControl* pControl) { pControl->SetDisabled(!active); });
+        pGraphics->ForControlInGroup(
+          "NAM_Controls_FS", [active](IControl* pControl) { pControl->SetDisabled(!active); });
         break;
-      case kIRToggle: pGraphics->GetControlWithTag(kCtrlTagIRFileBrowser)->SetDisabled(!active);
+      case kShowFrequencySliders:
+        pGraphics->ForControlInGroup("NAM_Controls_FS", [active](IControl* pControl) { pControl->Hide(!active); });
+        break;
+      case kFollowTrackColor:
+        GetUI()->ForStandardControlsFunc([&](IControl* pControl) {
+          if (auto* pVectorBase = pControl->As<IVectorBase>())
+          {
+            if (GetParam(kFollowTrackColor)->Value())
+            {
+              int r, g, b;
+              GetTrackColor(r, g, b);
+              if (r + g + b > 0) // is default color set in DAW ?
+                NAM_CUSTOMTHEMECOLOR = IColor(255, r, g, b);
+            }
+            else
+            {
+              if (mHighLightColor.GetLength())
+                NAM_CUSTOMTHEMECOLOR = IColor::FromColorCodeStr(mHighLightColor.Get());
+              else
+                NAM_CUSTOMTHEMECOLOR = PluginColors::NAM_THEMECOLOR;
+            }
+
+            pVectorBase->SetColor(kX1, NAM_CUSTOMTHEMECOLOR);
+            pVectorBase->SetColor(kPR, NAM_CUSTOMTHEMECOLOR.WithOpacity(0.6f));
+            pVectorBase->SetColor(kFR, NAM_CUSTOMTHEMECOLOR.WithOpacity(0.1f));
+            pVectorBase->SetColor(kX3, NAM_CUSTOMTHEMECOLOR.WithContrast(0.1f));
+          }
+          pControl->GetUI()->SetAllControlsDirty();
+        });
+        break;
+      case kIRToggle: pGraphics->GetControlWithTag(kCtrlTagIRFileBrowser)->SetDisabled(!active); break;
       default: break;
     }
   }
@@ -501,12 +628,12 @@ bool NeuralAmpModeler::OnMessage(int msgTag, int ctrlTag, int dataSize, const vo
         GetUI()->ForStandardControlsFunc([&](IControl* pControl) {
           if (auto* pVectorBase = pControl->As<IVectorBase>())
           {
-            IColor color = IColor::FromColorCodeStr(mHighLightColor.Get());
+            NAM_CUSTOMTHEMECOLOR = IColor::FromColorCodeStr(mHighLightColor.Get());
 
-            pVectorBase->SetColor(kX1, color);
-            pVectorBase->SetColor(kPR, color.WithOpacity(0.3f));
-            pVectorBase->SetColor(kFR, color.WithOpacity(0.4f));
-            pVectorBase->SetColor(kX3, color.WithContrast(0.1f));
+            pVectorBase->SetColor(kX1, NAM_CUSTOMTHEMECOLOR);
+            pVectorBase->SetColor(kPR, NAM_CUSTOMTHEMECOLOR.WithOpacity(0.6f));
+            pVectorBase->SetColor(kFR, NAM_CUSTOMTHEMECOLOR.WithOpacity(0.1f));
+            pVectorBase->SetColor(kX3, NAM_CUSTOMTHEMECOLOR.WithContrast(0.1f));
           }
           pControl->GetUI()->SetAllControlsDirty();
         });
@@ -542,7 +669,10 @@ void NeuralAmpModeler::_ApplyDSPStaging()
     mModel = nullptr;
     mNAMPath.Set("");
     mShouldRemoveModel = false;
+    mModelCleared = true;
     _UpdateLatency();
+    _SetInputGain();
+    _SetOutputGain();
   }
   if (mShouldRemoveIR)
   {
@@ -553,11 +683,12 @@ void NeuralAmpModeler::_ApplyDSPStaging()
   // Move things from staged to live
   if (mStagedModel != nullptr)
   {
-    // Move from staged to active DSP
     mModel = std::move(mStagedModel);
     mStagedModel = nullptr;
     mNewModelLoadedInDSP = true;
     _UpdateLatency();
+    _SetInputGain();
+    _SetOutputGain();
   }
   if (mStagedIR != nullptr)
   {
@@ -592,24 +723,6 @@ void NeuralAmpModeler::_FallbackDSP(iplug::sample** inputs, iplug::sample** outp
       mOutputArray[c][s] = mInputArray[c][s];
 }
 
-void NeuralAmpModeler::_NormalizeModelOutput(iplug::sample** buffer, const size_t numChannels, const size_t numFrames)
-{
-  if (!mModel)
-    return;
-  if (!mModel->HasLoudness())
-    return;
-  const double loudness = mModel->GetLoudness();
-  const double targetLoudness = -18.0;
-  const double gain = pow(10.0, (targetLoudness - loudness) / 20.0);
-  for (size_t c = 0; c < numChannels; c++)
-  {
-    for (size_t f = 0; f < numFrames; f++)
-    {
-      buffer[c][f] *= gain;
-    }
-  }
-}
-
 void NeuralAmpModeler::_ResetModelAndIR(const double sampleRate, const int maxBlockSize)
 {
   // Model
@@ -641,6 +754,48 @@ void NeuralAmpModeler::_ResetModelAndIR(const double sampleRate, const int maxBl
       mStagedIR = std::make_unique<dsp::ImpulseResponse>(irData, sampleRate);
     }
   }
+}
+
+void NeuralAmpModeler::_SetInputGain()
+{
+  iplug::sample inputGainDB = GetParam(kInputLevel)->Value();
+  // Input calibration
+  if ((mModel != nullptr) && (mModel->HasInputLevel()) && GetParam(kCalibrateInput)->Bool())
+  {
+    inputGainDB += GetParam(kInputCalibrationLevel)->Value() - mModel->GetInputLevel();
+  }
+  mInputGain = DBToAmp(inputGainDB);
+}
+
+void NeuralAmpModeler::_SetOutputGain()
+{
+  double gainDB = GetParam(kOutputLevel)->Value();
+  if (mModel != nullptr)
+  {
+    const int outputMode = GetParam(kOutputMode)->Int();
+    switch (outputMode)
+    {
+      case 1: // Normalized
+        if (mModel->HasLoudness())
+        {
+          const double loudness = mModel->GetLoudness();
+          const double targetLoudness = -18.0;
+          gainDB += (targetLoudness - loudness);
+        }
+        break;
+      case 2: // Calibrated
+        if (mModel->HasOutputLevel())
+        {
+          const double inputLevel = GetParam(kInputCalibrationLevel)->Value();
+          const double outputLevel = mModel->GetOutputLevel();
+          gainDB += (outputLevel - inputLevel);
+        }
+        break;
+      case 0: // Raw
+      default: break;
+    }
+  }
+  mOutputGain = DBToAmp(gainDB);
 }
 
 std::string NeuralAmpModeler::_StageModel(const WDL_String& modelPath)
@@ -726,7 +881,7 @@ size_t NeuralAmpModeler::_GetBufferNumFrames() const
 void NeuralAmpModeler::_InitToneStack()
 {
   // If you want to customize the tone stack, then put it here!
-  mToneStack = std::make_unique<dsp::tone_stack::BasicNamToneStack>();
+  mToneStack = std::make_unique<dsp::tone_stack::VariableNamToneStack>();
 }
 void NeuralAmpModeler::_PrepareBuffers(const size_t numChannels, const size_t numFrames)
 {
@@ -779,13 +934,12 @@ void NeuralAmpModeler::_ProcessInput(iplug::sample** inputs, const size_t nFrame
   }
 
   // On the standalone, we can probably assume that the user has plugged into only one input and they expect it to be
-  // carried straight through. Don't apply any division over nCahnsIn because we're just "catching anything out there."
+  // carried straight through. Don't apply any division over nChansIn because we're just "catching anything out there."
   // However, in a DAW, it's probably something providing stereo, and we want to take the average in order to avoid
-  // doubling the loudness.
-#ifdef APP_API
-  const double gain = pow(10.0, GetParam(kInputLevel)->Value() / 20.0);
-#else
-  const double gain = pow(10.0, GetParam(kInputLevel)->Value() / 20.0) / (float)nChansIn;
+  // doubling the loudness. (This would change w/ double mono processing)
+  double gain = mInputGain;
+#ifndef APP_API
+  gain /= (float)nChansIn;
 #endif
   // Assume _PrepareBuffers() was already called
   for (size_t c = 0; c < nChansIn; c++)
@@ -799,7 +953,7 @@ void NeuralAmpModeler::_ProcessInput(iplug::sample** inputs, const size_t nFrame
 void NeuralAmpModeler::_ProcessOutput(iplug::sample** inputs, iplug::sample** outputs, const size_t nFrames,
                                       const size_t nChansIn, const size_t nChansOut)
 {
-  const double gain = pow(10.0, GetParam(kOutputLevel)->Value() / 20.0);
+  const double gain = mOutputGain;
   // Assume _PrepareBuffers() was already called
   if (nChansIn != 1)
     throw std::runtime_error("Plugin is supposed to process in mono.");
@@ -815,79 +969,33 @@ void NeuralAmpModeler::_ProcessOutput(iplug::sample** inputs, iplug::sample** ou
 #endif
 }
 
-int NeuralAmpModeler::_UnserializeStateCurrent(const IByteChunk& chunk, int pos)
+void NeuralAmpModeler::_UpdateControlsFromModel()
 {
-  WDL_String version;
-  pos = chunk.GetStr(version, pos);
-  // Post-v0.7.9 legacy loading here once needed:
-  // ...
+  if (mModel == nullptr)
+  {
+    return;
+  }
+  if (auto* pGraphics = GetUI())
+  {
+    ModelInfo modelInfo;
+    modelInfo.sampleRate.known = true;
+    modelInfo.sampleRate.value = mModel->GetEncapsulatedSampleRate();
+    modelInfo.inputCalibrationLevel.known = mModel->HasInputLevel();
+    modelInfo.inputCalibrationLevel.value = mModel->HasInputLevel() ? mModel->GetInputLevel() : 0.0;
+    modelInfo.outputCalibrationLevel.known = mModel->HasOutputLevel();
+    modelInfo.outputCalibrationLevel.value = mModel->HasOutputLevel() ? mModel->GetOutputLevel() : 0.0;
 
-  // Current version loading:
-  pos = chunk.GetStr(mNAMPath, pos);
-  pos = chunk.GetStr(mIRPath, pos);
-  pos = UnserializeParams(chunk, pos);
-  return pos;
-}
+    static_cast<NAMSettingsPageControl*>(pGraphics->GetControlWithTag(kCtrlTagSettingsBox))->SetModelInfo(modelInfo);
 
-int NeuralAmpModeler::_UnserializeStateLegacy_0_7_9(const IByteChunk& chunk, int startPos)
-{
-  WDL_String dir;
-  int pos = startPos;
-  pos = chunk.GetStr(mNAMPath, pos);
-  pos = chunk.GetStr(mIRPath, pos);
-  auto unserialize = [&](const IByteChunk& chunk, int startPos) {
-    // cf IPluginBase::UnserializeParams(const IByteChunk& chunk, int startPos)
-
-    // These are the parameter names, in the order that they were serialized in v0.7.9.
-    std::vector<std::string> oldParamNames{
-      "Input", "Gate", "Bass", "Middle", "Treble", "Output", "NoiseGateActive", "ToneStack", "OutNorm", "IRToggle"};
-    // These are their current names.
-    // IF YOU CHANGE THE NAMES OF THE PARAMETERS, THEN YOU NEED TO UPDATE THIS!
-    std::unordered_map<std::string, std::string> newNames{{"Gate", "Threshold"}};
-    auto getParamByOldName = [&, newNames](std::string& oldName) {
-      std::string name = newNames.find(oldName) != newNames.end() ? newNames.at(oldName) : oldName;
-      // Could use a map but eh
-      for (int i = 0; i < kNumParams; i++)
-      {
-        IParam* param = GetParam(i);
-        if (strcmp(param->GetName(), name.c_str()) == 0)
-        {
-          return param;
-        }
-      }
-      return (IParam*)nullptr;
-    };
-    TRACE
-    int pos = startPos;
-    ENTER_PARAMS_MUTEX
-    int i = 0;
-    for (auto it = oldParamNames.begin(); it != oldParamNames.end(); ++it, i++)
+    const bool disableInputCalibrationControls = !mModel->HasInputLevel();
+    pGraphics->GetControlWithTag(kCtrlTagCalibrateInput)->SetDisabled(disableInputCalibrationControls);
+    pGraphics->GetControlWithTag(kCtrlTagInputCalibrationLevel)->SetDisabled(disableInputCalibrationControls);
     {
-      // Here's the change: instead of assuming that we can iterate through the parameters, we look for the one that now
-      // holds this info.
-      // IParam* pParam = mParams.Get(i);
-      IParam* pParam = getParamByOldName(*it);
-
-      double v = 0.0;
-      pos = chunk.Get(&v, pos);
-      // It's possible that future versions will not have all of the params of previous versions. If that's the case,
-      // then this is a null ptr and we skip it.
-      if (pParam)
-      {
-        pParam->Set(v);
-        Trace(TRACELOC, "%d %s %f", i, pParam->GetName(), pParam->Value());
-      }
-      else
-      {
-        Trace(TRACELOC, "%d NOT-FOUND", i);
-      }
+      auto* c = static_cast<OutputModeControl*>(pGraphics->GetControlWithTag(kCtrlTagOutputMode));
+      c->SetNormalizedDisable(!mModel->HasLoudness());
+      c->SetCalibratedDisable(!mModel->HasOutputLevel());
     }
-    OnParamReset(kPresetRecall);
-    LEAVE_PARAMS_MUTEX
-    return pos;
-  };
-  pos = unserialize(chunk, pos);
-  return pos;
+  }
 }
 
 void NeuralAmpModeler::_UpdateLatency()
@@ -926,3 +1034,6 @@ void NeuralAmpModeler::_UpdateMeters(sample** inputPointer, sample** outputPoint
   mInputSender.ProcessBlock(inputPointer, (int)nFrames, kCtrlTagInputMeter, nChansHack);
   mOutputSender.ProcessBlock(outputPointer, (int)nFrames, kCtrlTagOutputMeter, nChansHack);
 }
+
+// HACK
+#include "Unserialization.cpp"
